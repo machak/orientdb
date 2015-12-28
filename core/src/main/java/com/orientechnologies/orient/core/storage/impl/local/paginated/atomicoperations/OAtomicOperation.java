@@ -497,7 +497,7 @@ public class OAtomicOperation {
   }
 
   private static class FilePageChanges {
-    private OWALChanges        changes = new OWALChangesTree();
+    private OWALChanges        changes = new OWALPageChangesCollector();
     private OLogSequenceNumber lsn     = null;
     private boolean            isNew   = false;
     private boolean            pinPage = false;
