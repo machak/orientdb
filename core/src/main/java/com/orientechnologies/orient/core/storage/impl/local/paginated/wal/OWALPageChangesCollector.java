@@ -16,7 +16,7 @@ public class OWALPageChangesCollector implements  OWALChanges {
 
   public static final int CHUNK_SIZE = 64;
 
-  private final byte[][] pageChunks;
+  private byte[][] pageChunks;
   private final int      pageSize;
 
   public OWALPageChangesCollector() {
@@ -25,7 +25,6 @@ public class OWALPageChangesCollector implements  OWALChanges {
 
   public OWALPageChangesCollector(int pageSize) {
     this.pageSize = pageSize;
-    pageChunks = new byte[(pageSize + (CHUNK_SIZE - 1)) / CHUNK_SIZE][];
   }
 
   public void setLongValue(ODirectMemoryPointer pointer, int offset, long value) {
@@ -105,6 +104,8 @@ public class OWALPageChangesCollector implements  OWALChanges {
   }
 
   public void applyChanges(ODirectMemoryPointer pointer) {
+    if(pageChunks == null)
+      return;
     for (int i = 0; i < pageChunks.length; i++) {
       byte[] chunk = pageChunks[i];
       if (chunk != null) {
@@ -123,6 +124,8 @@ public class OWALPageChangesCollector implements  OWALChanges {
   }
 
   public int serializedSize() {
+    if(pageChunks == null)
+      return  1;
     int result = 1 + OShortSerializer.SHORT_SIZE;
     byte[] chunk = pageChunks[0];
 
@@ -144,7 +147,12 @@ public class OWALPageChangesCollector implements  OWALChanges {
   }
 
   public int toStream(int offset, byte[] stream) {
-
+    if (pageChunks == null) {
+      stream[offset] = 0;
+      return offset + 1;
+    } else {
+      stream[offset] = 1;
+    }
     if (pageChunks[0] != null) {
       stream[offset] = 1;
     }
@@ -183,6 +191,8 @@ public class OWALPageChangesCollector implements  OWALChanges {
   }
 
   public int fromStream(int offset, byte[] stream) {
+    if (stream[offset] == 0)
+      return offset + 1;
     boolean isNull = stream[offset] == 0;
     offset++;
 
@@ -215,6 +225,11 @@ public class OWALPageChangesCollector implements  OWALChanges {
   }
 
   private void readData(ODirectMemoryPointer pointer, int offset, byte[] data) {
+    if (pageChunks == null) {
+      if(pointer != null)
+        pointer.get(offset, data, 0, data.length);
+      return;
+    }
     int chunkIndex = offset / CHUNK_SIZE;
     int chunkOffset = offset - chunkIndex * CHUNK_SIZE;
 
@@ -250,6 +265,9 @@ public class OWALPageChangesCollector implements  OWALChanges {
   }
 
   private void updateData(ODirectMemoryPointer pointer, int offset, byte[] data) {
+    if (pageChunks == null) {
+      pageChunks = new byte[(pageSize + (CHUNK_SIZE - 1)) / CHUNK_SIZE][];
+    }
     int chunkIndex = offset / CHUNK_SIZE;
     int chunkOffset = offset - chunkIndex * CHUNK_SIZE;
 
