@@ -238,25 +238,23 @@ public class OWALPageChangesCollector implements  OWALChanges {
     while (read < data.length) {
       byte[] chunk = pageChunks[chunkIndex];
 
+      final int rl = Math.min(CHUNK_SIZE - chunkOffset, data.length - read);
       if (chunk == null) {
         if (pointer != null) {
           if (chunkIndex < pageChunks.length - 1) {
-            chunk = pointer.get(((long) chunkIndex * CHUNK_SIZE), CHUNK_SIZE);
+            pointer.get(((long) chunkIndex * CHUNK_SIZE)+ chunkOffset, data, read, rl);
           } else {
             final int chunkSize = Math.min(CHUNK_SIZE, pageSize - (pageChunks.length - 1) * CHUNK_SIZE);
-            chunk = new byte[CHUNK_SIZE];
 
             assert chunkSize <= CHUNK_SIZE;
             assert chunkSize > 0;
 
-            System.arraycopy(pointer.get(((long) chunkIndex * CHUNK_SIZE), chunkSize), 0, chunk, 0, chunkSize);
+            final int toRead = Math.min(rl, chunkSize);
+            pointer.get(((long) chunkIndex * CHUNK_SIZE) + chunkOffset, data, read, toRead);
           }
-        } else
-          chunk = new byte[CHUNK_SIZE];
-      }
-
-      final int rl = Math.min(CHUNK_SIZE - chunkOffset, data.length - read);
-      System.arraycopy(chunk, chunkOffset, data, read, rl);
+        }
+      } else
+        System.arraycopy(chunk, chunkOffset, data, read, rl);
 
       read += rl;
       chunkOffset = 0;
