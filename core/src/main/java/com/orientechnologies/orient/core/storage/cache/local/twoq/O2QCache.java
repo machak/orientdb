@@ -385,7 +385,7 @@ public class O2QCache implements OReadCache, O2QCacheMXBean {
     OCacheEntry cacheEntry = null;
 
     Lock fileLock;
-    Lock[] pageLocks;
+    Lock pageLock;
 
     final OModifiableBoolean cacheHit = new OModifiableBoolean(false);
 
@@ -393,13 +393,9 @@ public class O2QCache implements OReadCache, O2QCacheMXBean {
     try {
       fileLock = fileLockManager.acquireSharedLock(fileId);
       try {
-        final PageKey[] pageKeys = new PageKey[pageCount];
+        final PageKey pageKey = new PageKey(fileId, pageIndex);
 
-        for (int i = 0; i < pageKeys.length; i++) {
-          pageKeys[i] = new PageKey(fileId, pageIndex + i);
-
-        }
-        pageLocks = pageLockManager.acquireExclusiveLocksInBatch(pageKeys);
+        pageLock = pageLockManager.acquireExclusiveLock(pageKey);
         try {
           if (checkPinnedPages)
             cacheEntry = pinnedPages.get(new PinnedPage(fileId, pageIndex));
@@ -417,9 +413,7 @@ public class O2QCache implements OReadCache, O2QCacheMXBean {
 
           cacheEntry.incrementUsages();
         } finally {
-          for (Lock pageLock : pageLocks) {
-            pageLock.unlock();
-          }
+          pageLock.unlock();
         }
       } finally {
         fileLockManager.releaseLock(fileLock);
@@ -886,13 +880,11 @@ public class O2QCache implements OReadCache, O2QCacheMXBean {
     }
 
     boolean removeColdPages;
-    OCachePointer[] dataPointers = null;
+    OCachePointer dataPointer = null;
 
     cacheEntry = a1out.remove(fileId, pageIndex);
     if (cacheEntry != null) {
-      dataPointers = writeCache.load(fileId, pageIndex, pageCount, false, cacheHit);
-
-      OCachePointer dataPointer = dataPointers[0];
+      dataPointer = writeCache.load(fileId, pageIndex, pageCount, false, cacheHit);
       removeColdPages = entryWasInA1OutQueue(fileId, pageIndex, dataPointer, cacheEntry);
     } else {
       cacheEntry = a1in.get(fileId, pageIndex);
@@ -901,64 +893,18 @@ public class O2QCache implements OReadCache, O2QCacheMXBean {
         removeColdPages = entryIsInA1InQueue(fileId, pageIndex);
         cacheHit.setValue(true);
       } else {
-        dataPointers = writeCache.load(fileId, pageIndex, pageCount, addNewPages, cacheHit);
+        dataPointer = writeCache.load(fileId, pageIndex, pageCount, addNewPages, cacheHit);
 
-        if (dataPointers.length == 0)
+        if (dataPointer == null)
           return null;
 
-        OCachePointer dataPointer = dataPointers[0];
         final UpdateCacheResult ucr = entryIsAbsentInQueues(fileId, pageIndex, dataPointer);
         cacheEntry = ucr.cacheEntry;
         removeColdPages = ucr.removeColdPages;
       }
     }
 
-    if (dataPointers != null) {
-      for (int n = 1; n < dataPointers.length; n++) {
-        removeColdPages = processFetchedPage(removeColdPages, dataPointers[n]);
-      }
-    }
-
     return new UpdateCacheResult(removeColdPages, cacheEntry);
-  }
-
-  private boolean processFetchedPage(boolean removeColdPages, OCachePointer dataPointer) {
-    final long fileId = dataPointer.getFileId();
-    final long pageIndex = dataPointer.getPageIndex();
-
-    if (pinnedPages.containsKey(new PinnedPage(fileId, pageIndex))) {
-      return removeColdPages;
-    }
-
-    OCacheEntry cacheEntry = am.get(fileId, pageIndex);
-    if (cacheEntry != null) {
-      final boolean rcp = entryIsInAmQueue(fileId, pageIndex, cacheEntry);
-      removeColdPages = removeColdPages || rcp;
-      dataPointer.decrementReadersReferrer();
-
-      return removeColdPages;
-    }
-
-    cacheEntry = a1out.remove(fileId, pageIndex);
-    if (cacheEntry != null) {
-      final boolean rcp = entryWasInA1OutQueue(fileId, pageIndex, dataPointer, cacheEntry);
-      removeColdPages = removeColdPages || rcp;
-      return removeColdPages;
-    }
-
-    cacheEntry = a1in.get(fileId, pageIndex);
-    if (cacheEntry != null) {
-      final boolean rcp = entryIsInA1InQueue(fileId, pageIndex);
-      removeColdPages = removeColdPages || rcp;
-
-      dataPointer.decrementReadersReferrer();
-
-      return removeColdPages;
-    }
-
-    final boolean rcp = entryIsAbsentInQueues(fileId, pageIndex, dataPointer).removeColdPages;
-    removeColdPages = removeColdPages || rcp;
-    return removeColdPages;
   }
 
   private void removeColdestPagesIfNeeded() {

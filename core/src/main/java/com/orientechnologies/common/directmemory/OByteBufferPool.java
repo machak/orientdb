@@ -22,7 +22,8 @@ public class OByteBufferPool {
     final int pageSize = OGlobalConfiguration.DISK_CACHE_PAGE_SIZE.getValueAsInteger() * 1024;
 
     final BigDecimal cacheSize = new BigDecimal(OGlobalConfiguration.DISK_CACHE_SIZE.getValueAsLong() * 1024 * 1024);
-    final BigDecimal allocatedPages = cacheSize.add(new BigDecimal(OGlobalConfiguration.WAL_CACHE_SIZE.getValueAsInteger() + 1)).
+    final BigDecimal allocatedPages = cacheSize
+        .add(new BigDecimal((OGlobalConfiguration.WAL_CACHE_SIZE.getValueAsInteger() + 1001) * pageSize)).
         divide(new BigDecimal(pageSize), RoundingMode.CEILING);
 
     final int memoryChunkSize = OGlobalConfiguration.MEMORY_CHUNK_SIZE.getValueAsInteger();

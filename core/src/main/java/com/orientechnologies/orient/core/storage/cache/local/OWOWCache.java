@@ -41,6 +41,8 @@ import com.orientechnologies.orient.core.storage.cache.OAbstractWriteCache;
 import com.orientechnologies.orient.core.storage.cache.OCachePointer;
 import com.orientechnologies.orient.core.storage.cache.OPageDataVerificationError;
 import com.orientechnologies.orient.core.storage.cache.OWriteCache;
+import com.orientechnologies.orient.core.storage.cache.local.preload.OPreloadCache;
+import com.orientechnologies.orient.core.storage.cache.local.preload.OPreloadCacheImpl;
 import com.orientechnologies.orient.core.storage.fs.OFileClassic;
 import com.orientechnologies.orient.core.storage.impl.local.OLowDiskSpaceInformation;
 import com.orientechnologies.orient.core.storage.impl.local.OLowDiskSpaceListener;
@@ -147,7 +149,7 @@ public class OWOWCache extends OAbstractWriteCache implements OWriteCache, OCach
   private final AtomicLong            lastAmountOfFlushedPages = new AtomicLong();
   private final AtomicLong            durationOfLastFlush      = new AtomicLong();
 
-  private final OByteBufferPool bufferPool;
+  private final OPreloadCache preloadCache;
 
   private final       AtomicBoolean mbeanIsRegistered = new AtomicBoolean();
   public static final String        MBEAN_NAME        = "com.orientechnologies.orient.core.storage.cache.local:type=OWOWCacheMXBean";
@@ -164,7 +166,6 @@ public class OWOWCache extends OAbstractWriteCache implements OWriteCache, OCach
       this.pageSize = pageSize;
       this.groupTTL = groupTTL;
       this.writeAheadLog = writeAheadLog;
-      this.bufferPool = bufferPool;
 
       int writeNormalizedSize = normalizeMemory(writeCacheMaxSize, pageSize);
       if (checkMinSize && writeNormalizedSize < MIN_CACHE_SIZE)
@@ -187,6 +188,8 @@ public class OWOWCache extends OAbstractWriteCache implements OWriteCache, OCach
 
       commitExecutor = Executors.newSingleThreadScheduledExecutor(new FlushThreadFactory(storageLocal.getName()));
       lowSpaceEventsPublisher = Executors.newCachedThreadPool(new LowSpaceEventsPublisherFactory(storageLocal.getName()));
+
+      preloadCache = new OPreloadCacheImpl(writeAheadLog, pageSize, storagePerformanceStatistic, bufferPool, 1000, 10000);
 
       MAX_PAGES_PER_FLUSH = (int) (4000 / (1000.0 / pageFlushInterval));
 
@@ -601,7 +604,7 @@ public class OWOWCache extends OAbstractWriteCache implements OWriteCache, OCach
     }
   }
 
-  public OCachePointer[] load(long fileId, long startPageIndex, int pageCount, boolean addNewPages, OModifiableBoolean cacheHit)
+  public OCachePointer load(long fileId, long startPageIndex, int pageCount, boolean addNewPages, OModifiableBoolean cacheHit)
       throws IOException {
     final int intId = extractFileId(fileId);
     if (pageCount < 1)
@@ -609,37 +612,19 @@ public class OWOWCache extends OAbstractWriteCache implements OWriteCache, OCach
 
     filesLock.acquireReadLock();
     try {
-      final PageKey[] pageKeys = new PageKey[pageCount];
-      for (int i = 0; i < pageCount; i++) {
-        pageKeys[i] = new PageKey(intId, startPageIndex + i);
-      }
-
-      Lock[] pageLocks = lockManager.acquireSharedLocksInBatch(pageKeys);
+      final PageKey pageKey = new PageKey(intId, startPageIndex);
+      Lock pageLock = lockManager.acquireSharedLock(pageKey);
       try {
-        PageGroup pageGroup = writeCachePages.get(pageKeys[0]);
+        PageGroup pageGroup = writeCachePages.get(pageKey);
 
         if (pageGroup == null) {
-          final OCachePointer pagePointers[] = cacheFileContent(fileId, intId, startPageIndex, pageCount, addNewPages, cacheHit);
+          final OCachePointer pagePointer = cacheFileContent(fileId, intId, startPageIndex, pageCount, addNewPages, cacheHit);
 
-          if (pagePointers.length == 0)
-            return pagePointers;
+          if (pagePointer == null)
+            return null;
 
-          for (int n = 0; n < pagePointers.length; n++) {
-            pagePointers[n].incrementReadersReferrer();
-
-            if (n > 0) {
-              pageGroup = writeCachePages.get(pageKeys[n]);
-
-              assert pageKeys[n].pageIndex == pagePointers[n].getPageIndex();
-
-              if (pageGroup != null) {
-                pagePointers[n].decrementReadersReferrer();
-                pagePointers[n] = pageGroup.page;
-              }
-            }
-          }
-
-          return pagePointers;
+          pagePointer.incrementReadersReferrer();
+          return pagePointer;
         }
 
         final OCachePointer pagePointer = pageGroup.page;
@@ -647,11 +632,9 @@ public class OWOWCache extends OAbstractWriteCache implements OWriteCache, OCach
 
         cacheHit.setValue(true);
 
-        return new OCachePointer[] { pagePointer };
+        return pagePointer;
       } finally {
-        for (Lock lock : pageLocks) {
-          lock.unlock();
-        }
+        pageLock.unlock();
       }
     } finally {
       filesLock.releaseReadLock();
@@ -1226,7 +1209,7 @@ public class OWOWCache extends OAbstractWriteCache implements OWriteCache, OCach
     }
   }
 
-  private OCachePointer[] cacheFileContent(final long fileId, final int intId, final long startPageIndex, final int pageCount,
+  private OCachePointer cacheFileContent(final long fileId, final int intId, final long startPageIndex, final int pageCount,
       final boolean addNewPages, OModifiableBoolean cacheHit) throws IOException {
 
     final OFileClassic fileClassic = files.get(intId);
@@ -1234,84 +1217,7 @@ public class OWOWCache extends OAbstractWriteCache implements OWriteCache, OCach
     if (fileClassic == null)
       throw new IllegalArgumentException("File with id " + intId + " not found in WOW Cache");
 
-    final OLogSequenceNumber lastLsn;
-    if (writeAheadLog != null)
-      lastLsn = writeAheadLog.getFlushedLsn();
-    else
-      lastLsn = new OLogSequenceNumber(-1, -1);
-
-    final long firstPageStartPosition = startPageIndex * pageSize;
-    final long firstPageEndPosition = firstPageStartPosition + pageSize;
-
-    if (fileClassic.getFileSize() >= firstPageEndPosition) {
-      final OSessionStoragePerformanceStatistic sessionStoragePerformanceStatistic = OSessionStoragePerformanceStatistic
-          .getStatisticInstance();
-      if (sessionStoragePerformanceStatistic != null) {
-        sessionStoragePerformanceStatistic.startPageReadFromFileTimer();
-      }
-      storagePerformanceStatistic.startPageReadFromFileTimer();
-
-      int pagesRead = 0;
-
-      try {
-        if (pageCount == 1) {
-          final ByteBuffer buffer = bufferPool.acquireDirect(false);
-          fileClassic.read(firstPageStartPosition, buffer);
-          buffer.position(0);
-
-          final OCachePointer dataPointer = new OCachePointer(buffer, bufferPool, lastLsn, fileId, startPageIndex);
-          pagesRead = 1;
-          return new OCachePointer[] { dataPointer };
-        }
-
-        final long maxPageCount = (fileClassic.getFileSize() - firstPageStartPosition) / pageSize;
-        final int realPageCount = Math.min((int) maxPageCount, pageCount);
-
-        final ByteBuffer[] buffers = new ByteBuffer[realPageCount];
-        for (int i = 0; i < buffers.length; i++) {
-          buffers[i] = bufferPool.acquireDirect(false);
-          assert buffers[i].position() == 0;
-        }
-
-        final long bytesRead = fileClassic.read(firstPageStartPosition, buffers);
-        assert bytesRead % pageSize == 0;
-
-        final int buffersRead = (int) (bytesRead / pageSize);
-
-        final OCachePointer[] dataPointers = new OCachePointer[buffersRead];
-        for (int n = 0; n < buffersRead; n++) {
-          buffers[n].position(0);
-          dataPointers[n] = new OCachePointer(buffers[n], bufferPool, lastLsn, fileId, startPageIndex + n);
-        }
-
-        for (int n = buffersRead; n < buffers.length; n++) {
-          bufferPool.release(buffers[n]);
-        }
-
-        pagesRead = dataPointers.length;
-        return dataPointers;
-      } finally {
-        if (sessionStoragePerformanceStatistic != null) {
-          sessionStoragePerformanceStatistic.stopPageReadFromFileTimer(pagesRead);
-        }
-
-        storagePerformanceStatistic.stopPageReadFromFileTimer(pagesRead);
-      }
-    } else if (addNewPages) {
-      final int space = (int) (firstPageEndPosition - fileClassic.getFileSize());
-
-      if (space > 0)
-        fileClassic.allocateSpace(space);
-
-      addAllocatedSpace(space);
-
-      final ByteBuffer buffer = bufferPool.acquireDirect(true);
-      final OCachePointer dataPointer = new OCachePointer(buffer, bufferPool, lastLsn, fileId, startPageIndex);
-
-      cacheHit.setValue(true);
-      return new OCachePointer[] { dataPointer };
-    } else
-      return new OCachePointer[0];
+    return preloadCache.load(fileId, fileClassic, startPageIndex, pageCount, addNewPages, cacheHit);
   }
 
   private void flushPage(final int fileId, final long pageIndex, final ByteBuffer buffer) throws IOException {
