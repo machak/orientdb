@@ -1,18 +1,19 @@
 package com.orientechnologies.orient.core.storage.impl.local.paginated.wal;
 
-import com.orientechnologies.common.directmemory.ODirectMemoryPointer;
 import com.orientechnologies.common.serialization.types.OIntegerSerializer;
 import com.orientechnologies.common.serialization.types.OLongSerializer;
 import com.orientechnologies.common.serialization.types.OShortSerializer;
 import com.orientechnologies.orient.core.config.OGlobalConfiguration;
 import com.orientechnologies.orient.core.storage.cache.local.OWOWCache;
 
+import java.nio.ByteBuffer;
+
 /**
  * @author Andrey Lomakin <lomakin.andrey@gmail.com>.
  * @since 8/17/2015
  */
 public class OWALPageChangesLogCollector implements OWALChanges {
-  private static final int PAGE_SIZE = OGlobalConfiguration.DISK_CACHE_PAGE_SIZE.getValueAsInteger() * 1024 + 2 * OWOWCache.PAGE_PADDING;
+  private static final int PAGE_SIZE = OGlobalConfiguration.DISK_CACHE_PAGE_SIZE.getValueAsInteger() * 1024;
 
   public static final int    CHUNK_SIZE     = 64;
   public static final int    LOG_START_SIZE = 128;
@@ -29,44 +30,45 @@ public class OWALPageChangesLogCollector implements OWALChanges {
     this.pageSize = pageSize;
   }
 
-  public void setLongValue(ODirectMemoryPointer pointer, int offset, long value) {
+
+  public void setLongValue(ByteBuffer pointer, long value, int offset) {
     byte[] data = new byte[OLongSerializer.LONG_SIZE];
     OLongSerializer.INSTANCE.serializeNative(value, data, 0);
 
     updateData(pointer, offset, data);
   }
 
-  public void setIntValue(ODirectMemoryPointer pointer, int offset, int value) {
+  public void setIntValue(ByteBuffer pointer,int value, int offset) {
     byte[] data = new byte[OIntegerSerializer.INT_SIZE];
     OIntegerSerializer.INSTANCE.serializeNative(value, data, 0);
 
     updateData(pointer, offset, data);
   }
 
-  public void setShortValue(ODirectMemoryPointer pointer, int offset, short value) {
+  public void setShortValue(ByteBuffer pointer, short value,int offset) {
     byte[] data = new byte[OShortSerializer.SHORT_SIZE];
     OShortSerializer.INSTANCE.serializeNative(value, data, 0);
 
     updateData(pointer, offset, data);
   }
 
-  public void setByteValue(ODirectMemoryPointer pointer, int offset, byte value) {
+  public void setByteValue(ByteBuffer pointer, byte value,int offset) {
     byte[] data = new byte[] { value };
 
     updateData(pointer, offset, data);
   }
 
-  public void setBinaryValue(ODirectMemoryPointer pointer, int offset, byte[] value) {
+  public void setBinaryValue(ByteBuffer pointer, byte[] value, int offset) {
     updateData(pointer, offset, value);
   }
 
-  public void moveData(ODirectMemoryPointer pointer, int from, int to, int len) {
+  public void moveData(ByteBuffer pointer, int from, int to, int len) {
     byte[] buff = new byte[len];
     readData(pointer, from, buff);
     updateData(pointer, to, buff);
   }
 
-  public long getLongValue(ODirectMemoryPointer pointer, int offset) {
+  public long getLongValue(ByteBuffer pointer, int offset) {
     byte[] data = new byte[OLongSerializer.LONG_SIZE];
 
     readData(pointer, offset, data);
@@ -74,7 +76,7 @@ public class OWALPageChangesLogCollector implements OWALChanges {
     return OLongSerializer.INSTANCE.deserializeNative(data, 0);
   }
 
-  public int getIntValue(ODirectMemoryPointer pointer, int offset) {
+  public int getIntValue(ByteBuffer pointer, int offset) {
     byte[] data = new byte[OIntegerSerializer.INT_SIZE];
 
     readData(pointer, offset, data);
@@ -82,7 +84,7 @@ public class OWALPageChangesLogCollector implements OWALChanges {
     return OIntegerSerializer.INSTANCE.deserializeNative(data, 0);
   }
 
-  public short getShortValue(ODirectMemoryPointer pointer, int offset) {
+  public short getShortValue(ByteBuffer pointer, int offset) {
     byte[] data = new byte[OShortSerializer.SHORT_SIZE];
 
     readData(pointer, offset, data);
@@ -90,7 +92,7 @@ public class OWALPageChangesLogCollector implements OWALChanges {
     return OShortSerializer.INSTANCE.deserializeNative(data, 0);
   }
 
-  public byte getByteValue(ODirectMemoryPointer pointer, int offset) {
+  public byte getByteValue(ByteBuffer pointer, int offset) {
     byte[] data = new byte[1];
 
     readData(pointer, offset, data);
@@ -98,31 +100,29 @@ public class OWALPageChangesLogCollector implements OWALChanges {
     return data[0];
   }
 
-  public byte[] getBinaryValue(ODirectMemoryPointer pointer, int offset, int len) {
+  public byte[] getBinaryValue(ByteBuffer pointer, int offset, int len) {
     byte[] data = new byte[len];
     readData(pointer, offset, data);
 
     return data;
   }
 
-  public void applyChanges(ODirectMemoryPointer pointer) {
+  public void applyChanges(ByteBuffer pointer) {
     if (pageChunks == null)
       return;
     for (int i = 0; i < pageChunks.length; i++) {
       byte[] chunk = pageChunks[i];
       if (chunk != null) {
         if (i < pageChunks.length - 1) {
-          pointer.set(((long) i) * CHUNK_SIZE, chunk, 0, chunk.length);
+          pointer.position( i * CHUNK_SIZE);
+          pointer.put(chunk, 0, chunk.length);
         } else {
           final int wl = Math.min(chunk.length, pageSize - (pageChunks.length - 1) * CHUNK_SIZE);
-          pointer.set(((long) i) * CHUNK_SIZE, chunk, 0, wl);
+          pointer.position(i * CHUNK_SIZE);
+          pointer.put(chunk, 0, wl);
         }
       }
     }
-  }
-
-  public PointerWrapper wrap(ODirectMemoryPointer pointer) {
-    return new PointerWrapper(this, pointer);
   }
 
   public int serializedSize() {
@@ -153,10 +153,12 @@ public class OWALPageChangesLogCollector implements OWALChanges {
     return logSize + OIntegerSerializer.INT_SIZE;
   }
 
-  private void readData(ODirectMemoryPointer pointer, int offset, byte[] data) {
+  private void readData(ByteBuffer pointer, int offset, byte[] data) {
     if (pageChunks == null) {
-      if(pointer != null)
-        pointer.get(offset, data, 0, data.length);
+      if(pointer != null) {
+        pointer.position(offset);
+        pointer.get(data, 0, data.length);
+      }
       return;
     }
     int chunkIndex = offset / CHUNK_SIZE;
@@ -171,7 +173,8 @@ public class OWALPageChangesLogCollector implements OWALChanges {
       if (chunk == null) {
         if (pointer != null) {
           if (chunkIndex < pageChunks.length - 1) {
-            pointer.get(((long) chunkIndex * CHUNK_SIZE)+ chunkOffset, data, read, rl);
+            pointer.position((chunkIndex * CHUNK_SIZE)+ chunkOffset);
+            pointer.get( data, read, rl);
           } else {
             final int chunkSize = Math.min(CHUNK_SIZE, pageSize - (pageChunks.length - 1) * CHUNK_SIZE);
 
@@ -179,7 +182,8 @@ public class OWALPageChangesLogCollector implements OWALChanges {
             assert chunkSize > 0;
 
             final int toRead = Math.min(rl, chunkSize);
-            pointer.get(((long) chunkIndex * CHUNK_SIZE) + chunkOffset, data, read, toRead);
+            pointer.position((chunkIndex * CHUNK_SIZE) + chunkOffset);
+            pointer.get( data, read, toRead);
           }
         }
       } else
@@ -191,7 +195,7 @@ public class OWALPageChangesLogCollector implements OWALChanges {
     }
   }
 
-  private void updateData(ODirectMemoryPointer pointer, int offset, byte[] data) {
+  private void updateData(ByteBuffer pointer, int offset, byte[] data) {
     updateChunks(pointer, offset, data);
     logChange(offset, data);
   }
@@ -215,7 +219,7 @@ public class OWALPageChangesLogCollector implements OWALChanges {
     logCursor += data.length;
   }
 
-  private void updateChunks(ODirectMemoryPointer pointer, int offset, byte[] data) {
+  private void updateChunks(ByteBuffer pointer, int offset, byte[] data) {
     if (pageChunks == null) {
       pageChunks = new byte[(pageSize + (CHUNK_SIZE - 1)) / CHUNK_SIZE][];
     }
@@ -229,16 +233,18 @@ public class OWALPageChangesLogCollector implements OWALChanges {
 
       if (chunk == null) {
         if (pointer != null) {
-          if (chunkIndex < pageChunks.length - 1)
-            chunk = pointer.get(((long) chunkIndex) * CHUNK_SIZE, CHUNK_SIZE);
-          else {
+          if (chunkIndex < pageChunks.length - 1) {
+            pointer.position((chunkIndex) * CHUNK_SIZE);
+            chunk = new byte[CHUNK_SIZE];
+            pointer.get(chunk);
+          } else {
             final int chunkSize = Math.min(CHUNK_SIZE, pageSize - (pageChunks.length - 1) * CHUNK_SIZE);
             chunk = new byte[CHUNK_SIZE];
 
             assert chunkSize <= CHUNK_SIZE;
             assert chunkSize > 0;
-
-            System.arraycopy(pointer.get(((long) chunkIndex * CHUNK_SIZE), chunkSize), 0, chunk, 0, chunkSize);
+            pointer.position((chunkIndex * CHUNK_SIZE));
+            pointer.get( chunk, 0, chunkSize);
           }
         } else {
           chunk = new byte[CHUNK_SIZE];
